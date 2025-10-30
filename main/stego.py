@@ -1,199 +1,200 @@
-# storage.py
-import sqlite3
-from typing import Optional
+# stego.py
+import io
+import math
+import random
+import struct
+from typing import Tuple
 
-DB_FILE = "messages.db"
+from PIL import Image
 
-def init_db():
-    print("    💾 DATABASE - INITIALIZATION PROCESS")
+# LSB-based steganography with pseudo-random pixel ordering.
+# We embed raw bytes into least-significant bits of RGB channels.
+# Payload is preceded by a 32-bit length header (big-endian), so extraction knows how many bytes to read.
+
+def _bytes_to_bits(data: bytes) -> str:
+    return ''.join(f"{b:08b}" for b in data)
+
+def _bits_to_bytes(bits: str) -> bytes:
+    b = bytearray()
+    for i in range(0, len(bits), 8):
+        byte = bits[i:i+8]
+        if len(byte) < 8:
+            byte = byte.ljust(8, '0')
+        b.append(int(byte, 2))
+    return bytes(b)
+
+def embed_bytes_into_png(cover_image_bytes: bytes, payload: bytes, seed: int = None) -> bytes:
+    """
+    cover_image_bytes: bytes of a PNG image
+    payload: bytes to embed
+    seed: optional integer seed for pseudo-random pixel order (should be stored in metadata)
+    Returns PNG bytes of stego image.
+    """
+    print("    🖼️  STEGANOGRAPHY - EMBEDDING PROCESS")
     print("    " + "=" * 45)
     
-    print("    [5.1] Connecting to SQLite database...")
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    print(f"        • Database file: {DB_FILE}")
-    print("        ✓ Database connection established")
+    print("    [3.1] Loading and analyzing cover image...")
+    img = Image.open(io.BytesIO(cover_image_bytes)).convert("RGB")
+    w, h = img.size
+    pixels = img.load()
+    print(f"        • Image dimensions: {w} x {h} pixels")
+    print(f"        • Total pixels: {w * h:,}")
+    print(f"        • Color channels: RGB (3 channels per pixel)")
 
-    # Check if table exists
-    print("\n    [5.2] Checking for existing messages table...")
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='messages'")
-    table_exists = cur.fetchone()
+    # prepare bits: 4-byte big-endian length + payload
+    print("\n    [3.2] Preparing payload for embedding...")
+    length_prefix = struct.pack(">I", len(payload))
+    full = length_prefix + payload
+    bits = _bytes_to_bits(full)
+    capacity = w * h * 3  # 3 LSBs per pixel
+    print(f"        • Payload size: {len(payload)} bytes")
+    print(f"        • Length prefix: {len(length_prefix)} bytes")
+    print(f"        • Total data to embed: {len(full)} bytes")
+    print(f"        • Data as bits: {len(bits)} bits")
+    print(f"        • Available capacity: {capacity:,} bits")
     
-    if table_exists:
-        print("        • Messages table found")
-        print("\n    [5.3] Inspecting table schema...")
-        # Inspect schema
-        cur.execute("PRAGMA table_info(messages)")
-        columns = cur.fetchall()
-        col_types = {col[1]: col[2].upper() for col in columns}
-        print(f"        • Table columns: {list(col_types.keys())}")
-        print(f"        • Column types: {col_types}")
+    if len(bits) > capacity:
+        raise ValueError(f"❌ Payload too large for cover image capacity ({len(bits)} bits > {capacity})")
+    
+    utilization = (len(bits) / capacity) * 100
+    print(f"        • Capacity utilization: {utilization:.2f}%")
+    print("        ✓ Payload fits within image capacity")
 
-        # If timestamp or seed are INTEGER, recreate table as TEXT
-        if col_types.get("timestamp") == "INTEGER" or col_types.get("seed") == "INTEGER":
-            print("\n    [5.4] Updating schema (converting INTEGER to TEXT)...")
-            print("        • Found old schema with INTEGER fields")
-            print("        • Recreating table with TEXT fields for better compatibility")
-            
-            cur.execute("ALTER TABLE messages RENAME TO old_messages")
-            conn.commit()
-            print("        • Old table renamed to 'old_messages'")
+    # generate pseudo-random positions
+    print("\n    [3.3] Generating pseudo-random pixel positions...")
+    total_slots = w * h * 3
+    indices = list(range(total_slots))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+    print(f"        • Total available slots: {total_slots:,}")
+    print(f"        • Random seed: {seed}")
+    print(f"        • Positions shuffled for security")
+    print("        ✓ Random embedding positions generated")
 
-            # Create new schema with TEXT for timestamp and seed
-            cur.execute("""
-            CREATE TABLE messages (
-                id TEXT PRIMARY KEY,
-                sender_id TEXT,
-                recipient_id TEXT,
-                timestamp TEXT,
-                seed TEXT,
-                blob BLOB
-            )
-            """)
-            print("        • New table schema created")
+    # embed
+    print("\n    [3.4] Embedding data using LSB steganography...")
+    bit_idx = 0
+    modified_pixels = 0
+    
+    for slot in indices:
+        if bit_idx >= len(bits):
+            break
+        pixel_index = slot // 3
+        channel = slot % 3  # 0:R,1:G,2:B
+        x = pixel_index % w
+        y = pixel_index // w
+        r, g, b = pixels[x, y]
+        channels = [r, g, b]
+        bit = int(bits[bit_idx])
+        old_value = channels[channel]
+        channels[channel] = (channels[channel] & ~1) | bit
+        if old_value != channels[channel]:
+            modified_pixels += 1
+        pixels[x, y] = tuple(channels)
+        bit_idx += 1
 
-            # Copy over old rows, casting timestamp+seed to TEXT
-            cur.execute("""
-            INSERT INTO messages (id, sender_id, recipient_id, timestamp, seed, blob)
-            SELECT id, sender_id, recipient_id, CAST(timestamp AS TEXT), CAST(seed AS TEXT), blob
-            FROM old_messages
-            """)
-            conn.commit()
-            print("        • Data migrated from old table")
-            
-            cur.execute("DROP TABLE old_messages")
-            conn.commit()
-            print("        • Old table dropped")
-            print("        ✓ Schema updated successfully")
-        else:
-            print("        • Schema is already up-to-date")
-    else:
-        print("        • No existing messages table found")
-        print("\n    [5.3] Creating new messages table...")
-        # Fresh DB
-        cur.execute("""
-        CREATE TABLE messages (
-            id TEXT PRIMARY KEY,
-            sender_id TEXT,
-            recipient_id TEXT,
-            timestamp TEXT,
-            seed TEXT,
-            blob BLOB
-        )
-        """)
-        conn.commit()
-        print("        • Table schema:")
-        print("          - id: TEXT PRIMARY KEY")
-        print("          - sender_id: TEXT")
-        print("          - recipient_id: TEXT")
-        print("          - timestamp: TEXT")
-        print("          - seed: TEXT")
-        print("          - blob: BLOB")
-        print("        ✓ New table created successfully")
+    print(f"        • Bits embedded: {bit_idx}")
+    print(f"        • Pixels modified: {modified_pixels:,}")
+    print(f"        • Embedding efficiency: {(bit_idx/len(bits))*100:.2f}%")
+    print("        ✓ Data embedded successfully using LSB technique")
 
-    conn.close()
-    print("\n    ✓ Database initialization completed successfully")
+    # save to bytes
+    print("\n    [3.5] Saving stego image...")
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    stego_bytes = out.getvalue()
+    print(f"        • Stego image size: {len(stego_bytes)} bytes")
+    print(f"        • Size difference: {len(stego_bytes) - len(cover_image_bytes)} bytes")
+    print("        ✓ Stego image saved successfully")
 
+    # display the image
+    print("\n    [3.6] Displaying stego image...")
+    stego_img = Image.open(io.BytesIO(stego_bytes))
+    stego_img.show()  # This opens the image in the default viewer
+    print("        ✓ Stego image displayed")
+    
+    print("    ✓ Message embedded successfully in the image using LSB steganography")
+    return stego_bytes
 
-def store_message_blob(msg_id: str, sender_id: str, recipient_id: str,
-                       timestamp, seed: int, blob: bytes):
-    """Store message; force timestamp and seed to TEXT to avoid overflow."""
-    print("    💾 DATABASE - STORING MESSAGE")
+def extract_bytes_from_png(stego_png_bytes: bytes, seed: int = None) -> bytes:
+    print("    🔍 STEGANOGRAPHY - EXTRACTION PROCESS")
     print("    " + "=" * 45)
     
-    print("    [6.1] Preparing message for storage...")
-    print(f"        • Message ID: {msg_id}")
-    print(f"        • Sender: {sender_id}")
-    print(f"        • Recipient: {recipient_id}")
-    print(f"        • Timestamp: {timestamp}")
-    print(f"        • Seed: {seed}")
-    print(f"        • Blob size: {len(blob)} bytes")
-    
-    print("\n    [6.2] Connecting to database...")
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    print("        ✓ Database connection established")
-    
-    print("\n    [6.3] Inserting message into database...")
-    cur.execute(
-        "INSERT INTO messages (id, sender_id, recipient_id, timestamp, seed, blob) VALUES (?, ?, ?, ?, ?, ?)",
-        (msg_id, sender_id, recipient_id, str(timestamp), str(seed), blob)
-    )
-    conn.commit()
-    print("        • Message inserted successfully")
-    print("        • Transaction committed")
-    
-    print("\n    [6.4] Verifying storage...")
-    cur.execute("SELECT COUNT(*) FROM messages WHERE id = ?", (msg_id,))
-    count = cur.fetchone()[0]
-    if count > 0:
-        print("        ✓ Message verified in database")
-    else:
-        print("        ❌ Message not found in database")
-    
-    conn.close()
-    print("        ✓ Database connection closed")
-    print("    ✓ Message stored successfully in database")
+    print("    [4.1] Loading stego image...")
+    img = Image.open(io.BytesIO(stego_png_bytes)).convert("RGB")
+    w, h = img.size
+    pixels = img.load()
+    print(f"        • Image dimensions: {w} x {h} pixels")
+    print(f"        • Total pixels: {w * h:,}")
+    print(f"        • Color channels: RGB (3 channels per pixel)")
 
+    print("\n    [4.2] Generating pseudo-random pixel positions...")
+    total_slots = w * h * 3
+    indices = list(range(total_slots))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+    print(f"        • Total available slots: {total_slots:,}")
+    print(f"        • Random seed: {seed}")
+    print(f"        • Positions shuffled for extraction")
+    print("        ✓ Random extraction positions generated")
 
-def fetch_message_blob(msg_id: str) -> Optional[dict]:
-    """Fetch message and auto-convert timestamp and seed back to int if possible."""
-    print("    💾 DATABASE - RETRIEVING MESSAGE")
-    print("    " + "=" * 45)
+    # Extract enough bits to read 4-byte length header first
+    print("\n    [4.3] Extracting length header...")
+    bits = []
+    # Read first 32 bits (length header)
+    for i in range(32):
+        slot = indices[i]
+        pixel_index = slot // 3
+        channel = slot % 3
+        x = pixel_index % w
+        y = pixel_index // w
+        r, g, b = pixels[x, y]
+        channels = [r, g, b]
+        bits.append(str(channels[channel] & 1))
     
-    print("    [7.1] Preparing to fetch message...")
-    print(f"        • Message ID: {msg_id}")
+    length_bytes = _bits_to_bytes(''.join(bits))
+    payload_len = struct.unpack(">I", length_bytes)[0]
+    print(f"        • Length header bits: {''.join(bits)}")
+    print(f"        • Length header bytes: {length_bytes.hex()}")
+    print(f"        • Payload length: {payload_len} bytes")
+    print("        ✓ Length header extracted successfully")
+
+    # Now we know how many bits the payload needs: payload_len * 8
+    needed_bits = (payload_len + 4) * 8  # includes the 4-byte header
+    print(f"\n    [4.4] Calculating total bits needed...")
+    print(f"        • Payload bits needed: {payload_len * 8}")
+    print(f"        • Header bits: 32")
+    print(f"        • Total bits needed: {needed_bits}")
+    print(f"        • Available slots: {total_slots:,}")
     
-    print("\n    [7.2] Connecting to database...")
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    print("        ✓ Database connection established")
+    if needed_bits > total_slots:
+        raise ValueError("❌ Stego image does not contain enough data")
+    print("        ✓ Sufficient data available for extraction")
+
+    # Extract the full bitstream (we already have first 32 bits)
+    print("\n    [4.5] Extracting complete data...")
+    bits = []
+    for i in range(needed_bits):
+        slot = indices[i]
+        pixel_index = slot // 3
+        channel = slot % 3
+        x = pixel_index % w
+        y = pixel_index // w
+        r, g, b = pixels[x, y]
+        channels = [r, g, b]
+        bits.append(str(channels[channel] & 1))
+
+    data = _bits_to_bytes(''.join(bits))
+    print(f"        • Total bits extracted: {len(bits)}")
+    print(f"        • Data size: {len(data)} bytes")
+    print(f"        • Data preview: {data[:20].hex()}{'...' if len(data) > 20 else ''}")
+    print("        ✓ Complete data extracted successfully")
+
+    # Strip the 4-byte length prefix
+    payload = data[4:]
+    print(f"\n    [4.6] Finalizing extraction...")
+    print(f"        • Payload size: {len(payload)} bytes")
+    print(f"        • Payload preview: {payload[:20].hex()}{'...' if len(payload) > 20 else ''}")
+    print("    ✓ Bytes successfully extracted from PNG using LSB steganography")
+    return payload
     
-    print("\n    [7.3] Querying database...")
-    cur.execute("SELECT sender_id, recipient_id, timestamp, seed, blob FROM messages WHERE id=?", (msg_id,))
-    row = cur.fetchone()
-    
-    if row:
-        print("        • Message found in database")
-        sender_id, recipient_id, timestamp, seed, blob = row
-        print(f"        • Raw data retrieved:")
-        print(f"          - Sender: {sender_id}")
-        print(f"          - Recipient: {recipient_id}")
-        print(f"          - Timestamp: {timestamp}")
-        print(f"          - Seed: {seed}")
-        print(f"          - Blob size: {len(blob)} bytes")
-        
-        print("\n    [7.4] Converting data types...")
-        try:
-            timestamp = int(timestamp)
-            print(f"        • Timestamp converted to int: {timestamp}")
-        except (ValueError, TypeError):
-            print(f"        • Timestamp kept as string: {timestamp}")
-        
-        try:
-            seed = int(seed)
-            print(f"        • Seed converted to int: {seed}")
-        except (ValueError, TypeError):
-            print(f"        • Seed kept as string: {seed}")
-        
-        result = {
-            "sender_id": sender_id,
-            "recipient_id": recipient_id,
-            "timestamp": timestamp,
-            "seed": seed,
-            "blob": blob
-        }
-        print("        ✓ Data type conversion completed")
-    else:
-        print("        ❌ Message not found in database")
-        result = None
-    
-    conn.close()
-    print("        ✓ Database connection closed")
-    
-    if result:
-        print("    ✓ Message retrieved successfully from database")
-    else:
-        print("    ❌ Message retrieval failed")
-    
-    return result
