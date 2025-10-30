@@ -95,6 +95,7 @@ def package_message(eph_pub: x25519.X25519PublicKey, nonce: bytes, ciphertext_an
         "signature": base64.b64encode(signature).decode(),
         "metadata": metadata
     }
+    print("Message packed Successfully.")
     return json.dumps(obj).encode()
 
 def unpack_message(package_bytes: bytes) -> Dict[str, Any]:
@@ -117,24 +118,52 @@ def sender_prepare_message(sender_sign_sk: ed25519.Ed25519PrivateKey,
     Returns final package bytes (JSON base64 encoded) that will be embedded into an image.
     Steps: compress -> ECDH(ephemeral) -> derive AES key -> AES-GCM encrypt -> sign(ciphertext || metadata) -> package
     """
+    print("    🔐 SENDER SIDE - ENCRYPTION PROCESS")
+    print("    " + "=" * 45)
+    
     # 1. compress plaintext
+    print("    [1.1] Compressing plaintext...")
     compressed = compress_data(plaintext)
+    compression_ratio = (1 - len(compressed) / len(plaintext)) * 100
+    print(f"        • Original size: {len(plaintext)} bytes")
+    print(f"        • Compressed size: {len(compressed)} bytes")
+    print(f"        • Compression ratio: {compression_ratio:.2f}%")
+    print(f"        • Compressed data: {compressed[:50]}{'...' if len(compressed) > 50 else ''}")
 
     # 2. ephemeral X25519 key and derive AES key
+    print("\n    [1.2] Generating ephemeral key pair...")
     eph_priv = x25519.X25519PrivateKey.generate()
     eph_pub = eph_priv.public_key()
+    print(f"        • Ephemeral private key generated")
+    print(f"        • Ephemeral public key: {pubkey_bytes(eph_pub).hex()[:32]}...")
+    
+    print("\n    [1.3] Deriving shared AES key...")
     aes_key = derive_shared_key(eph_priv, recipient_x25519_pk)
+    print(f"        • Shared secret derived via X25519 ECDH")
+    print(f"        • AES-256 key: {aes_key.hex()[:32]}...")
 
     # 3. AES-GCM encrypt compressed data (use metadata as AAD)
+    print("\n    [1.4] Encrypting with AES-GCM...")
     aad = json.dumps(metadata).encode()
+    print(f"        • Additional Authenticated Data (AAD): {aad}")
     nonce, ciphertext_and_tag = aes_gcm_encrypt(aes_key, compressed, aad=aad)
+    print(f"        • Nonce (12 bytes): {nonce.hex()}")
+    print(f"        • Ciphertext + Tag: {ciphertext_and_tag.hex()[:50]}...")
+    print(f"        • Total encrypted size: {len(ciphertext_and_tag)} bytes")
 
     # 4. Sign SHA256(ciphertext||aad) to authenticate sender and integrity
+    print("\n    [1.5] Creating digital signature...")
     sign_input = hashes_sha256(ciphertext_and_tag + aad)
+    print(f"        • Hash input: {sign_input.hex()}")
     signature = sign_bytes(sender_sign_sk, sign_input)
+    print(f"        • Ed25519 signature: {signature.hex()[:32]}...")
+    print(f"        • Signature size: {len(signature)} bytes")
 
     # 5. package fields (base64 JSON)
+    print("\n    [1.6] Packaging message...")
     package = package_message(eph_pub, nonce, ciphertext_and_tag, signature, metadata)
+    print(f"        • Final package size: {len(package)} bytes")
+    print("    ✓ Sender encryption completed successfully")
     return package
 
 def recipient_process_package(recipient_x25519_sk: x25519.X25519PrivateKey,
@@ -143,6 +172,10 @@ def recipient_process_package(recipient_x25519_sk: x25519.X25519PrivateKey,
     """
     Reverse of sender_prepare_message.
     """
+    print("    🔓 RECEIVER SIDE - DECRYPTION PROCESS")
+    print("    " + "=" * 45)
+    
+    print("    [2.1] Unpacking message...")
     obj = unpack_message(package_bytes)
     eph_pub = obj["eph_pub"]
     nonce = obj["nonce"]
@@ -150,20 +183,42 @@ def recipient_process_package(recipient_x25519_sk: x25519.X25519PrivateKey,
     signature = obj["signature"]
     metadata = obj["metadata"]
     aad = json.dumps(metadata).encode()
+    
+    print(f"        • Ephemeral public key: {pubkey_bytes(eph_pub).hex()[:32]}...")
+    print(f"        • Nonce: {nonce.hex()}")
+    print(f"        • Ciphertext + Tag size: {len(ciphertext_and_tag)} bytes")
+    print(f"        • Signature: {signature.hex()[:32]}...")
+    print(f"        • Metadata: {metadata}")
+    print(f"        • AAD: {aad}")
 
     # Verify signature first
+    print("\n    [2.2] Verifying digital signature...")
     sign_input = hashes_sha256(ciphertext_and_tag + aad)
+    print(f"        • Hash input: {sign_input.hex()}")
     if not verify_signature(sender_sign_pk, sign_input, signature):
-        raise ValueError("Signature verification failed")
+        raise ValueError("❌ Signature verification failed")
+    print("        ✓ Signature verification successful")
 
     # derive AES key via ECDH
+    print("\n    [2.3] Deriving shared AES key...")
     aes_key = derive_shared_key(recipient_x25519_sk, eph_pub)
+    print(f"        • AES-256 key: {aes_key.hex()[:32]}...")
+    print("        ✓ Shared key derived successfully")
 
     # decrypt
+    print("\n    [2.4] Decrypting with AES-GCM...")
     compressed = aes_gcm_decrypt(aes_key, nonce, ciphertext_and_tag, aad=aad)
+    print(f"        • Decrypted compressed data: {compressed[:50]}{'...' if len(compressed) > 50 else ''}")
+    print(f"        • Compressed data size: {len(compressed)} bytes")
+    print("        ✓ Decryption successful")
 
     # decompress
+    print("\n    [2.5] Decompressing data...")
     plaintext = decompress_data(compressed)
+    print(f"        • Decompressed plaintext: {plaintext}")
+    print(f"        • Final message size: {len(plaintext)} bytes")
+    print("        ✓ Decompression successful")
+    print("    ✓ Receiver decryption completed successfully")
     return plaintext
 
 # ---------- small helpers ----------
