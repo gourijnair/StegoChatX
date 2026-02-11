@@ -158,6 +158,7 @@ CREATE TABLE messages (
 ## 👨‍💻 Authors
 
 * **
+Gouri Nair
 Anurag Paul
 Abdur
 * ** – 7th Sem Cyber Security Project
